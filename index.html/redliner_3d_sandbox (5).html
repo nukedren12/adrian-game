@@ -1,0 +1,2069 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Redliner HTML - Dev Textures, Grapple, & Sliding</title>
+    <style>
+        body { 
+            margin: 0; 
+            overflow: hidden; 
+            background-color: #0d0d13; 
+            font-family: 'Courier New', monospace; 
+            user-select: none;
+        }
+        #vignette {
+            position: absolute;
+            top: 0; left: 0; width: 100vw; height: 100vh;
+            background: radial-gradient(circle, transparent 40%, rgba(13, 13, 19, 0.8) 100%);
+            pointer-events: none;
+            z-index: 5;
+        }
+        #crosshair {
+            position: absolute; top: 50%; left: 50%; width: 12px; height: 12px;
+            transform: translate(-50%, -50%); border: 2px solid #00ffcc; border-radius: 50%; 
+            pointer-events: none; z-index: 10; transition: transform 0.1s ease;
+        }
+        #scope {
+            position: absolute; top: 0; left: 0; width: 100vw; height: 100vh;
+            border: 15vh solid black; box-sizing: border-box; display: none; pointer-events: none;
+            box-shadow: inset 0 0 100px rgba(255,0,0,0.6); z-index: 8;
+        }
+        #scope::after, #scope::before {
+            content: ''; position: absolute; background: red;
+        }
+        #scope::after { top: 50%; left: 0; width: 100%; height: 2px; }
+        #scope::before { left: 50%; top: 0; width: 2px; height: 100%; }
+        #hud {
+            position: absolute; bottom: 30px; left: 30px; color: #fff; font-size: 24px;
+            font-weight: bold; text-shadow: 0 0 5px #000; pointer-events: none; z-index: 10;
+        }
+        #weapon-status {
+            position: absolute; bottom: 30px; right: 30px; color: #00ffcc; font-size: 20px;
+            text-align: right; text-shadow: 0 0 5px #000; pointer-events: none; z-index: 10;
+        }
+        #click-to-play {
+            position: absolute; width: 100%; height: 100%; background: rgba(10,10,15,0.95);
+            color: #fff; display: flex; flex-direction: column; justify-content: center;
+            align-items: center; cursor: pointer; text-align: center; font-size: 18px; z-index: 100;
+        }
+        #impact-frame {
+            position: absolute; top:0; left:0; width:100vw; height:100vh;
+            background: white; opacity: 0; pointer-events: none; transition: opacity 0.05s ease-out; z-index: 6;
+        }
+        .btn-style {
+            background: transparent; color: #00ffcc; border: 2px solid #00ffcc;
+            padding: 10px 20px; font-family: inherit; font-size: 16px; font-weight: bold;
+            border-radius: 8px; margin-top: 15px; cursor: pointer; transition: all 0.2s ease;
+        }
+        .btn-style:hover {
+            background: #00ffcc; color: #0d0d13; box-shadow: 0 0 15px #00ffcc;
+        }
+    </style>
+    <!-- Lightweight production builds of Three.js -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
+</head>
+<body>
+
+    <div id="click-to-play">
+        <h1 style="color: #ff0055; text-shadow: 0 0 10px #ff0055; margin-bottom: 5px;">REDLINER SANDBOX</h1>
+        <p style="color:#00ffcc; font-size: 14px; margin-top: 0; letter-spacing: 2px;">PERFORMANCE EDITION</p>
+        <div style="font-size: 14px; color:#aaa; line-height: 1.6; max-width: 500px; border: 1px solid #333; padding: 20px; border-radius: 12px; background: rgba(0,0,0,0.5);">
+            [WASD] Move | [Shift] SPRINT (Hold)<br>
+            [C] or [Left Ctrl] = SLIDE (2s duration, tap again after to re-slide)<br>
+            [E] = GRAPPLING HOOK (tap once to fire & attach, tap again to release + launch)<br>
+            Run at a wall to auto-WALLRUN &mdash; [Space] while wallrunning = WALL JUMP<br>
+            [1] Katana - Left: Slash | Right: PARRY (Hold)<br>
+            [2] Sniper - Left: Fire (Physical Bullet) | Right: Scope thermal sight (Hold)<br>
+            [F] near the TITAN BAY = ENTER/EXIT MECH (Chaingun: Hold Left Click)
+        </div>
+        <button class="btn-style">LAUNCH ENGINE</button>
+    </div>
+
+    <div id="vignette"></div>
+    <div id="crosshair"></div>
+    <div id="scope"></div>
+    <div id="impact-frame"></div>
+    <div id="mech-prompt" style="position:absolute; top:60%; left:50%; transform:translate(-50%,-50%); color:#ffcc00; font-family:'Courier New',monospace; font-weight:bold; font-size:18px; text-shadow:0 0 8px #000, 0 0 14px #ffcc00; letter-spacing:2px; pointer-events:none; z-index:10; display:none;">[F] ENTER TITAN</div>
+    
+    <div id="hud">
+        SPEED: <span id="ui-speed">0</span><br>
+        STATE: <span id="ui-state">NORMAL</span>
+    </div>
+
+    <div id="weapon-status">
+        WEAPON: <span id="ui-weapon">KATANA</span><br>
+        ACTION: <span id="ui-action">READY</span>
+    </div>
+
+    <script>
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        
+        function playSynthSound(type) {
+            if (audioCtx.state === 'suspended') {
+                audioCtx.resume();
+            }
+            try {
+                const now = audioCtx.currentTime;
+                if (type === 'whoosh') {
+                    // Katana sword swing whoosh sound
+                    const osc = audioCtx.createOscillator();
+                    const gainNode = audioCtx.createGain();
+                    const filter = audioCtx.createBiquadFilter();
+                    
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(100, now);
+                    osc.frequency.exponentialRampToValueAtTime(600, now + 0.1);
+                    osc.frequency.exponentialRampToValueAtTime(120, now + 0.25);
+                    
+                    filter.type = 'bandpass';
+                    filter.frequency.setValueAtTime(150, now);
+                    filter.frequency.exponentialRampToValueAtTime(1500, now + 0.1);
+                    filter.frequency.exponentialRampToValueAtTime(200, now + 0.25);
+                    
+                    gainNode.gain.setValueAtTime(0.01, now);
+                    gainNode.gain.linearRampToValueAtTime(0.8, now + 0.08);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.28);
+                    
+                    osc.connect(filter);
+                    filter.connect(gainNode);
+                    gainNode.connect(audioCtx.destination);
+                    osc.start(now);
+                    osc.stop(now + 0.3);
+                } else if (type === 'hit_metal') {
+                    // Katana hit on dummy (metallic sound)
+                    const osc1 = audioCtx.createOscillator();
+                    const osc2 = audioCtx.createOscillator();
+                    const gainNode = audioCtx.createGain();
+                    
+                    osc1.type = 'sine';
+                    osc1.frequency.setValueAtTime(1200, now);
+                    osc1.frequency.exponentialRampToValueAtTime(800, now + 0.15);
+                    
+                    osc2.type = 'sine';
+                    osc2.frequency.setValueAtTime(1850, now);
+                    osc2.frequency.exponentialRampToValueAtTime(100, now + 0.2);
+                    
+                    gainNode.gain.setValueAtTime(0.4, now);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+                    
+                    osc1.connect(gainNode);
+                    osc2.connect(gainNode);
+                    gainNode.connect(audioCtx.destination);
+                    
+                    osc1.start(now);
+                    osc2.start(now);
+                    osc1.stop(now + 0.25);
+                    osc2.stop(now + 0.25);
+                } else if (type === 'hit_wall') {
+                    // Sword hitting wall (dusty debris impact)
+                    const bufferSize = audioCtx.sampleRate * 0.15;
+                    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+                    const data = buffer.getChannelData(0);
+                    for (let i = 0; i < bufferSize; i++) {
+                        data[i] = Math.random() * 2 - 1;
+                    }
+                    const noise = audioCtx.createBufferSource();
+                    noise.buffer = buffer;
+                    
+                    const filter = audioCtx.createBiquadFilter();
+                    filter.type = 'lowpass';
+                    filter.frequency.setValueAtTime(400, now);
+                    
+                    const gainNode = audioCtx.createGain();
+                    gainNode.gain.setValueAtTime(0.3, now);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.12);
+                    
+                    noise.connect(filter);
+                    filter.connect(gainNode);
+                    gainNode.connect(audioCtx.destination);
+                    noise.start(now);
+                } else if (type === 'gunshot') {
+                    // Sniper shot sound
+                    const bufferSize = audioCtx.sampleRate * 0.8;
+                    const buffer = audioCtx.createBuffer(1, bufferSize, audioCtx.sampleRate);
+                    const data = buffer.getChannelData(0);
+                    for (let i = 0; i < bufferSize; i++) {
+                        data[i] = Math.random() * 2 - 1;
+                    }
+                    const noise = audioCtx.createBufferSource();
+                    noise.buffer = buffer;
+                    
+                    const filter = audioCtx.createBiquadFilter();
+                    filter.type = 'bandpass';
+                    filter.frequency.setValueAtTime(1000, now);
+                    filter.frequency.exponentialRampToValueAtTime(120, now + 0.15);
+                    
+                    const gainNode = audioCtx.createGain();
+                    gainNode.gain.setValueAtTime(1.0, now);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
+                    
+                    noise.connect(filter);
+                    filter.connect(gainNode);
+                    gainNode.connect(audioCtx.destination);
+                    noise.start(now);
+                    
+                    // Thump osc
+                    const thump = audioCtx.createOscillator();
+                    const thumpGain = audioCtx.createGain();
+                    thump.frequency.setValueAtTime(90, now);
+                    thump.frequency.exponentialRampToValueAtTime(20, now + 0.15);
+                    thumpGain.gain.setValueAtTime(0.8, now);
+                    thumpGain.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+                    thump.connect(thumpGain);
+                    thumpGain.connect(audioCtx.destination);
+                    thump.start(now);
+                    thump.stop(now + 0.25);
+                } else if (type === 'grapple_zip') {
+                    // Grapple deploy sound
+                    const osc = audioCtx.createOscillator();
+                    const gainNode = audioCtx.createGain();
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(300, now);
+                    osc.frequency.exponentialRampToValueAtTime(1200, now + 0.15);
+                    gainNode.gain.setValueAtTime(0.15, now);
+                    gainNode.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+                    osc.connect(gainNode);
+                    gainNode.connect(audioCtx.destination);
+                    osc.start(now);
+                    osc.stop(now + 0.2);
+                } else if (type === 'footstep') {
+                    // Gentle soft footsteps -- slight random pitch/volume per step avoids the
+                    // machine-gun repetitiveness of an identical sound firing every stride.
+                    const osc = audioCtx.createOscillator();
+                    const gainNode = audioCtx.createGain();
+                    const pitchJitter = 0.85 + Math.random() * 0.3;
+                    osc.type = 'sine';
+                    osc.frequency.setValueAtTime(80 * pitchJitter, now);
+                    gainNode.gain.setValueAtTime((isSprinting ? 0.22 : 0.1) * (0.85 + Math.random() * 0.3), now);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.08);
+                    osc.connect(gainNode);
+                    gainNode.connect(audioCtx.destination);
+                    osc.start(now);
+                    osc.stop(now + 0.1);
+                } else if (type === 'wall_hit_land') {
+                    // Distinct soft thud for wall-jump kickoff / landing so movement chaining
+                    // has audible feedback without reusing the footstep sound everywhere.
+                    const osc = audioCtx.createOscillator();
+                    const gainNode = audioCtx.createGain();
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(140, now);
+                    osc.frequency.exponentialRampToValueAtTime(60, now + 0.12);
+                    gainNode.gain.setValueAtTime(0.3, now);
+                    gainNode.gain.exponentialRampToValueAtTime(0.001, now + 0.14);
+                    osc.connect(gainNode);
+                    gainNode.connect(audioCtx.destination);
+                    osc.start(now);
+                    osc.stop(now + 0.15);
+                }
+            } catch (e) {
+                console.warn("Audio processing failed", e);
+            }
+        }
+
+        const scene = new THREE.Scene();
+        scene.background = new THREE.Color(0x87CEEB); // Beautiful Sky Blue
+        scene.fog = new THREE.FogExp2(0x87CEEB, 0.007); // Subtly matching fog
+
+        const camera = new THREE.PerspectiveCamera(75, window.innerWidth / window.innerHeight, 0.1, 1000);
+        const renderer = new THREE.WebGLRenderer({ antialias: true, powerPreference: "high-performance" });
+        renderer.setSize(window.innerWidth, window.innerHeight);
+        renderer.shadowMap.enabled = true;
+        renderer.shadowMap.type = THREE.PCFSoftShadowMap; // Lightweight, nice shadows on integrated GPUs
+        document.body.appendChild(renderer.domElement);
+
+        // Reusing materials to minimize draw-calls and bypass state changes
+        const grayMat = new THREE.MeshPhongMaterial({ color: 0x555555, roughness: 0.6, shininess: 30 });
+        const orangeEmissive = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
+        const darkMetal = new THREE.MeshPhongMaterial({ color: 0x222222, shininess: 80 });
+        const steelGrayMat = new THREE.MeshPhongMaterial({ color: 0x888888, shininess: 90 });
+        const goldMat = new THREE.MeshPhongMaterial({ color: 0xffcc33, shininess: 100 });
+        const redGripMat = new THREE.MeshPhongMaterial({ color: 0xaa2222 });
+
+        const mapElements = [];
+        const targets = [];
+        const collidables = []; // Explicit list of structures with bounding dimensions for the collision engine
+
+        // Lighting: Warm sunset contrasts with cold ambient sky
+        const ambientLight = new THREE.AmbientLight(0xb0c4de, 0.6); // Cool blue-ish sky ambient fill
+        scene.add(ambientLight);
+
+        const sunLight = new THREE.DirectionalLight(0xffdfa9, 0.9); // Warm golden direct light
+        sunLight.position.set(100, 150, 50);
+        sunLight.castShadow = true;
+        sunLight.shadow.mapSize.width = 1024; 
+        sunLight.shadow.mapSize.height = 1024;
+        sunLight.shadow.camera.near = 0.5;
+        sunLight.shadow.camera.far = 400;
+        const d = 150;
+        sunLight.shadow.camera.left = -d;
+        sunLight.shadow.camera.right = d;
+        sunLight.shadow.camera.top = d;
+        sunLight.shadow.camera.bottom = -d;
+        scene.add(sunLight);
+
+        // Ground setup
+        const groundGeo = new THREE.PlaneGeometry(2400, 2400);
+        const groundMesh = new THREE.Mesh(groundGeo, grayMat);
+        groundMesh.rotation.x = -Math.PI / 2;
+        groundMesh.receiveShadow = true;
+        scene.add(groundMesh);
+
+        const groundGrid = new THREE.GridHelper(2400, 200, 0x000000, 0x000000);
+        groundGrid.position.y = 0.02;
+        scene.add(groundGrid);
+        mapElements.push(groundMesh);
+
+        // Procedural helper to build structures decorated with ACs, pipes, rails, and warning lights.
+        // matOverride/accentHex let each district get its own color identity without duplicating the function.
+        function createBuilding(w, h, d, x, y, z, rotY = 0, rotX = 0, rotZ = 0, matOverride = null, accentHex = 0x00ffcc) {
+            const group = new THREE.Group();
+            const boxGeo = new THREE.BoxGeometry(w, h, d);
+            const mesh = new THREE.Mesh(boxGeo, matOverride || grayMat);
+            mesh.castShadow = true;
+            mesh.receiveShadow = true;
+            group.add(mesh);
+
+            // Crisp black outline grids
+            const edges = new THREE.EdgesGeometry(boxGeo);
+            const lineMat = new THREE.LineBasicMaterial({ color: 0x000000 });
+            const wireframe = new THREE.LineSegments(edges, lineMat);
+            group.add(wireframe);
+
+            // Bright emissive trim strip along the top edge -- gives each district a readable
+            // silhouette/glow at speed instead of flat gray boxes (ULTRAKILL-style contrast).
+            if (Math.min(w, d) > 3 && h > 4) {
+                const trimMat = new THREE.MeshBasicMaterial({ color: accentHex });
+                const trimGeo = new THREE.BoxGeometry(w + 0.15, 0.35, d + 0.15);
+                const trim = new THREE.Mesh(trimGeo, trimMat);
+                trim.position.set(0, h / 2 - 0.2, 0);
+                group.add(trim);
+                const trimLight = new THREE.PointLight(accentHex, 0.6, Math.max(w, d) * 1.4);
+                trimLight.position.set(0, h / 2, 0);
+                group.add(trimLight);
+            }
+
+            // procedural props: Rooftop industrial equipment
+            if (h > 10) {
+                // AC Unit
+                const ac = new THREE.Mesh(new THREE.BoxGeometry(2, 2, 2), steelGrayMat);
+                ac.position.set(0, h/2 + 1, 0);
+                group.add(ac);
+
+                // Pipes running up building walls
+                const pipeGeo = new THREE.CylinderGeometry(0.2, 0.2, h, 8);
+                const pipe = new THREE.Mesh(pipeGeo, darkMetal);
+                pipe.position.set(w/2 + 0.1, 0, d/2 - 2);
+                group.add(pipe);
+
+                // Decorative warning glow light
+                const beacon = new THREE.Mesh(new THREE.SphereGeometry(0.3, 8, 8), new THREE.MeshBasicMaterial({ color: accentHex }));
+                beacon.position.set(-w/2 + 1, h/2 + 0.3, -d/2 + 1);
+                group.add(beacon);
+            }
+
+            group.position.set(x, y, z);
+            group.rotation.set(rotX, rotY, rotZ);
+            scene.add(group);
+            
+            mapElements.push(mesh);
+
+            // Register non-rotated structures directly to our advanced AABB slider collision list
+            if (rotX === 0 && rotY === 0 && rotZ === 0) {
+                collidables.push({
+                    minX: x - w/2,
+                    maxX: x + w/2,
+                    minY: y - h/2,
+                    maxY: y + h/2,
+                    minZ: z - d/2,
+                    maxZ: z + d/2
+                });
+            }
+            return group;
+        }
+
+        // Thin vertical slab -- used for wallrun corridors and narrow structural walls
+        function createWall(w, h, d, x, y, z, accentHex = 0x00ffcc) {
+            return createBuilding(w, h, d, x, y, z, 0, 0, 0, darkMetal, accentHex);
+        }
+
+        // Flat walkable slab (catwalks, bridges, rooftops-between-buildings) with a thin glowing edge rail
+        function createPlatform(w, thickness, d, x, y, z, mat = steelGrayMat, accentHex = 0xff2266) {
+            const group = createBuilding(w, thickness, d, x, y, z, 0, 0, 0, mat, accentHex);
+            return group;
+        }
+
+        // Stacked shipping container -- bright, high-contrast industrial cover/step-up geometry
+        function createContainer(x, y, z, rotY = 0, colorHex = 0xff6a00) {
+            const mat = new THREE.MeshPhongMaterial({ color: colorHex, shininess: 40 });
+            return createBuilding(8, 4, 3, x, y, z, rotY, 0, 0, mat, 0xffcc00);
+        }
+
+        // Simple crane: mast + horizontal boom + counterweight, mast is climbable/collidable
+        function createCrane(x, z, mastHeight, boomLength, accentHex = 0xffcc00) {
+            createWall(1.6, mastHeight, 1.6, x, mastHeight / 2, z, accentHex);
+            const boomMat = new THREE.MeshPhongMaterial({ color: 0x333333, shininess: 60 });
+            createPlatform(boomLength, 1, 1.6, x + boomLength / 2 - 1, mastHeight, z, boomMat, accentHex);
+            createPlatform(6, 1, 1.6, x - 4, mastHeight, z, boomMat, accentHex);
+        }
+
+        // A flat slab with a square hole cut out of the middle, built from 4 solid pieces.
+        // Used to make climbable interior floors that you jump/grapple up through.
+        function createFloorRing(outerSize, holeSize, thickness, x, y, z, mat, accentHex) {
+            const half = outerSize / 2, hole = holeSize / 2;
+            const slabDepth = half - hole;
+            createPlatform(outerSize, thickness, slabDepth, x, y, z - hole - slabDepth / 2, mat, accentHex);
+            createPlatform(outerSize, thickness, slabDepth, x, y, z + hole + slabDepth / 2, mat, accentHex);
+            createPlatform(slabDepth, thickness, holeSize * 2, x - hole - slabDepth / 2, y, z, mat, accentHex);
+            createPlatform(slabDepth, thickness, holeSize * 2, x + hole + slabDepth / 2, y, z, mat, accentHex);
+        }
+
+        // ---- Lightweight helpers for the movement training course ----
+        // These are deliberately cheap: flat unlit decals and thin emissive meshes, sharing
+        // materials/geometry wherever possible so the course stays friendly on integrated GPUs.
+
+        const neonStripMat = new THREE.MeshBasicMaterial({ color: 0x00ffcc, transparent: true, opacity: 0.55, side: THREE.DoubleSide });
+        const neonStripGeo = new THREE.PlaneGeometry(1.4, 1);
+        // Ground decal pointing the way forward -- purely visual, never added to mapElements/collidables
+        // so it can't interfere with grappling, bullets, or wallrun raycasts.
+        function createGuideStrip(x, y, z, rotY, len) {
+            const mesh = new THREE.Mesh(neonStripGeo, neonStripMat);
+            mesh.scale.set(1, len, 1);
+            mesh.rotation.x = -Math.PI / 2;
+            mesh.rotation.y = rotY;
+            mesh.position.set(x, y + 0.05, z);
+            scene.add(mesh);
+            return mesh;
+        }
+
+        const beaconGeo = new THREE.CylinderGeometry(0.15, 0.15, 6, 6);
+        // Checkpoint / spawn pylon -- a thin glowing column + point light, cheap to render and
+        // readable from a distance so the player always knows where progress was last saved.
+        function createBeacon(x, y, z, colorHex = 0x00ffcc) {
+            const mesh = new THREE.Mesh(beaconGeo, new THREE.MeshBasicMaterial({ color: colorHex }));
+            mesh.position.set(x, y + 3, z);
+            scene.add(mesh);
+            const light = new THREE.PointLight(colorHex, 1.0, 22);
+            light.position.set(x, y + 4, z);
+            scene.add(light);
+            return mesh;
+        }
+
+        // Purely decorative ventilation duct / pipe run -- not collidable, just industrial dressing
+        function createDuct(x, y, z, length, rotZ = Math.PI / 2, rotY = 0) {
+            const geo = new THREE.CylinderGeometry(0.9, 0.9, length, 8);
+            const mesh = new THREE.Mesh(geo, steelGrayMat);
+            mesh.rotation.z = rotZ;
+            mesh.rotation.y = rotY;
+            mesh.position.set(x, y, z);
+            mesh.castShadow = true;
+            scene.add(mesh);
+            return mesh;
+        }
+
+        // Moving platforms: reuse createBuilding for the visual + static collidable registration,
+        // then every frame we translate both the mesh and its collidable AABB in animate(). Vertical
+        // motion needs no extra "carry" code -- the existing ground-collision overlap check already
+        // lifts a standing player as the box rises underneath them.
+        const movingProps = [];
+        function createMovingPlatform(w, h, d, x, y, z, axis, amplitude, speed, accentHex = 0xffcc33) {
+            const group = createBuilding(w, h, d, x, y, z, 0, 0, 0, steelGrayMat, accentHex);
+            const collEntry = collidables[collidables.length - 1];
+            movingProps.push({ group, collEntry, baseX: x, baseY: y, baseZ: z, axis, amplitude, speed });
+            return group;
+        }
+
+        // ===================== ENVIRONMENT LAYOUT =====================
+        // Each district gets its own accent color so it reads instantly at high speed,
+        // and every district is close enough to its neighbors to sprint/grapple/wallrun between.
+
+        // --- Central District (cyan) : core towers + the swing-under bridge ---
+        createBuilding(30, 45, 30, -35, 22.5, -45, 0, 0, 0, null, 0x00ffcc);
+        createBuilding(40, 20, 40, 50, 10, -25, 0, 0, 0, null, 0x00ffcc);
+        createBuilding(50, 12, 25, -60, 6, 40, 0, 0, 0, null, 0x00ffcc);
+        createBuilding(30, 30, 30, 55, 15, 50, 0, 0, 0, null, 0x00ffcc);
+
+        // Massive horizontal bridge corridor to swing under
+        createBuilding(90, 8, 20, 0, 40, 0, 0, 0, 0, null, 0x00ffcc);
+
+        // Huge Speed slide-ramp (angle around X axis to incline it)
+        const ramp = createBuilding(25, 2, 80, -45, 12, -110, 0, Math.PI / 10, 0, null, 0x00ffcc);
+
+        // --- Wallrun Canyon (magenta) : parallel walls carved into a corridor, north-west ---
+        // Gap is 7 units wide -- just enough to wallrun one side, jump-cancel, and catch the other.
+        createWall(70, 24, 2.4, -125, 12, -154.2, 0xff2266);
+        createWall(70, 24, 2.4, -125, 12, -159.8, 0xff2266);
+        createWall(1.6, 24, 12, -160, 12, -157, 0xff2266); // end cap you can wall-jump off of
+        createBuilding(16, 10, 16, -90, 5, -157, 0, 0, 0, null, 0xff2266); // landing pad exiting the canyon
+
+        // --- Rooftop Cluster (violet) : staggered towers for vertical jump/grapple chaining ---
+        createBuilding(14, 20, 14, 110, 10, -60, 0, 0, 0, null, 0x9d4bff);
+        createBuilding(14, 34, 14, 138, 17, -48, 0, 0, 0, null, 0x9d4bff);
+        createBuilding(14, 26, 14, 132, 13, -18, 0, 0, 0, null, 0x9d4bff);
+        createBuilding(14, 44, 14, 158, 22, -32, 0, 0, 0, null, 0x9d4bff);
+        // Narrow beams stitching the rooftops together -- thin enough to demand precision
+        createPlatform(3, 0.6, 26, 124, 20.3, -54, steelGrayMat, 0x9d4bff);
+        createPlatform(3, 0.6, 24, 135, 26.3, -33, steelGrayMat, 0x9d4bff);
+        createPlatform(26, 0.6, 3, 145, 21.3, -25, steelGrayMat, 0x9d4bff);
+
+        // --- Container Yard (orange) : staircase of stacked shipping containers, south ---
+        createContainer(-60, 4.5, 130, 0);
+        createContainer(-52, 4.5, 130, 0);
+        createContainer(-56, 8.5, 138, Math.PI / 2);
+        createContainer(-44, 8.5, 130, 0);
+        createContainer(-44, 12.5, 122, Math.PI / 2);
+        createContainer(-30, 4.5, 118, Math.PI / 2);
+        createContainer(-30, 4.5, 108, Math.PI / 2); // hidden gap between these two conceals a shortcut passage
+        createBuilding(20, 26, 20, -20, 13, 150, 0, 0, 0, null, 0xff6a00); // yard's anchor warehouse
+
+        // --- Industrial Crane (gold) : boom overhang for big swinging grapple arcs ---
+        createCrane(-60, 90, 40, 34, 0xffcc33);
+
+        // --- Long bridge (magenta) connecting the container yard to the rooftop cluster ---
+        createPlatform(8, 1, 90, 90, 6, 90, steelGrayMat, 0xff2266);
+
+        // --- Hollow Interior Climb Shaft (cyan) : jump/grapple up through open floor rings ---
+        const interiorX = 120, interiorZ = 40, interiorSize = 24;
+        createWall(2.2, 52, interiorSize, interiorX - interiorSize / 2, 39, interiorZ, 0x00ffcc);
+        createWall(2.2, 52, interiorSize, interiorX + interiorSize / 2, 39, interiorZ, 0x00ffcc);
+        createWall(interiorSize, 52, 2.2, interiorX, 39, interiorZ - interiorSize / 2, 0x00ffcc);
+        createWall(interiorSize, 52, 2.2, interiorX, 39, interiorZ + interiorSize / 2, 0x00ffcc);
+        createFloorRing(interiorSize - 1.5, 8, 1, interiorX, 20, interiorZ, steelGrayMat, 0x00ffcc);
+        createFloorRing(interiorSize - 1.5, 8, 1, interiorX, 35, interiorZ, steelGrayMat, 0x00ffcc);
+        createFloorRing(interiorSize - 1.5, 8, 1, interiorX, 50, interiorZ, steelGrayMat, 0x00ffcc);
+        createPlatform(interiorSize - 1.5, 1, interiorSize - 1.5, interiorX, 65.5, interiorZ, steelGrayMat, 0x00ffcc); // rooftop cap
+
+        // Practice Combat Dummies
+        const dummyMaterial = new THREE.MeshBasicMaterial({ color: 0x33333c, wireframe: true });
+        const thermalMaterial = new THREE.MeshBasicMaterial({ color: 0xff1100 });
+
+        for (let i = 0; i < 12; i++) {
+            const dGeo = new THREE.BoxGeometry(2, 5, 2);
+            const dMesh = new THREE.Mesh(dGeo, dummyMaterial.clone());
+            let rx = (Math.random() - 0.5) * 160;
+            let rz = (Math.random() - 0.5) * 160;
+            dMesh.position.set(rx, 2.5, rz);
+            scene.add(dMesh);
+            targets.push(dMesh);
+        }
+
+        const weaponContainer = new THREE.Group();
+        camera.add(weaponContainer);
+        scene.add(camera);
+
+        // HAND-CRAFTED KATANA (Procedurally built out of blade, guard, grip wraps, and pommel)
+        const katanaGroup = new THREE.Group();
+        
+        // Steel Blade (grooved and tapered)
+        const bladeMesh = new THREE.Mesh(new THREE.BoxGeometry(0.015, 1.4, 0.07), steelGrayMat);
+        bladeMesh.position.y = 0.7;
+        katanaGroup.add(bladeMesh);
+
+        const hamonLine = new THREE.Mesh(new THREE.BoxGeometry(0.016, 1.35, 0.01), goldMat);
+        hamonLine.position.set(0.001, 0.675, -0.035);
+        katanaGroup.add(hamonLine);
+
+        // Tsuba (Handguard)
+        const guardMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.12, 0.02, 16), darkMetal);
+        guardMesh.rotation.x = Math.PI / 2;
+        katanaGroup.add(guardMesh);
+
+        // Handle (Tsuka) with wrapped layers
+        const handleMesh = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.04, 0.35, 12), darkMetal);
+        handleMesh.position.y = -0.175;
+        katanaGroup.add(handleMesh);
+
+        const wrap1 = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.05, 12), redGripMat);
+        wrap1.position.y = -0.1;
+        katanaGroup.add(wrap1);
+
+        const wrap2 = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 0.05, 12), redGripMat);
+        wrap2.position.y = -0.22;
+        katanaGroup.add(wrap2);
+
+        // Kashira (Pommel cap)
+        const pommelMesh = new THREE.Mesh(new THREE.SphereGeometry(0.048, 8, 8), darkMetal);
+        pommelMesh.position.y = -0.36;
+        katanaGroup.add(pommelMesh);
+
+        katanaGroup.position.set(0.35, -0.35, -0.6);
+        katanaGroup.rotation.set(Math.PI / 4, 0, -Math.PI / 5);
+        weaponContainer.add(katanaGroup);
+
+        const trailPointsCount = 10;
+        const trailHistory = [];
+        const trailGeo = new THREE.BufferGeometry();
+        const trailVertices = new Float32Array(trailPointsCount * 2 * 3);
+        const trailUVs = new Float32Array(trailPointsCount * 2 * 2);
+        
+        trailGeo.setAttribute('position', new THREE.BufferAttribute(trailVertices, 3));
+        trailGeo.setAttribute('uv', new THREE.BufferAttribute(trailUVs, 2));
+
+        // Create high-fidelity clean translucent ribbon material
+        const trailMat = new THREE.MeshBasicMaterial({
+            color: 0x00ffcc,
+            transparent: true,
+            opacity: 0.5,
+            side: THREE.DoubleSide,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false
+        });
+        const trailMesh = new THREE.Mesh(trailGeo, trailMat);
+        scene.add(trailMesh);
+
+        // Dynamic indices list for ribbon rendering
+        const trailIndices = [];
+        for (let i = 0; i < trailPointsCount - 1; i++) {
+            trailIndices.push(i * 2, i * 2 + 1, (i + 1) * 2);
+            trailIndices.push(i * 2 + 1, (i + 1) * 2 + 1, (i + 1) * 2);
+        }
+        trailGeo.setIndex(trailIndices);
+
+        const sniperGroup = new THREE.Group();
+
+        // Main Receiver Frame
+        const receiver = new THREE.Mesh(new THREE.BoxGeometry(0.09, 0.12, 0.8), darkMetal);
+        sniperGroup.add(receiver);
+
+        // Handguard & Barrel
+        const handguard = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.08, 0.6), steelGrayMat);
+        handguard.position.z = -0.7;
+        sniperGroup.add(handguard);
+
+        const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.02, 0.025, 0.9, 8), steelGrayMat);
+        barrel.rotation.x = Math.PI / 2;
+        barrel.position.set(0, 0.02, -1.35);
+        sniperGroup.add(barrel);
+
+        const muzzleBrake = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.035, 0.12, 8), darkMetal);
+        muzzleBrake.rotation.x = Math.PI / 2;
+        muzzleBrake.position.set(0, 0.02, -1.82);
+        sniperGroup.add(muzzleBrake);
+
+        // Tactile Scope
+        const scopeMain = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.45, 12), darkMetal);
+        scopeMain.rotation.x = Math.PI / 2;
+        scopeMain.position.set(0, 0.11, -0.1);
+        sniperGroup.add(scopeMain);
+
+        const scopeEye = new THREE.Mesh(new THREE.CylinderGeometry(0.04, 0.035, 0.12, 12), steelGrayMat);
+        scopeEye.rotation.x = Math.PI / 2;
+        scopeEye.position.set(0, 0.11, 0.15);
+        sniperGroup.add(scopeEye);
+
+        const scopeGlass = new THREE.Mesh(new THREE.CylinderGeometry(0.035, 0.04, 0.12, 12), goldMat);
+        scopeGlass.rotation.x = Math.PI / 2;
+        scopeGlass.position.set(0, 0.11, -0.325);
+        sniperGroup.add(scopeGlass);
+
+        const mountPostFront = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.05, 0.04), steelGrayMat);
+        mountPostFront.position.set(0, 0.08, -0.2);
+        sniperGroup.add(mountPostFront);
+
+        const mountPostRear = new THREE.Mesh(new THREE.BoxGeometry(0.02, 0.05, 0.04), steelGrayMat);
+        mountPostRear.position.set(0, 0.08, 0.1);
+        sniperGroup.add(mountPostRear);
+
+        // Tactile Grip & Bolt handle
+        const stockGrip = new THREE.Mesh(new THREE.BoxGeometry(0.07, 0.2, 0.1), redGripMat);
+        stockGrip.position.set(0, -0.15, 0.1);
+        stockGrip.rotation.x = Math.PI / 6;
+        sniperGroup.add(stockGrip);
+
+        const boltHandle = new THREE.Mesh(new THREE.CylinderGeometry(0.012, 0.012, 0.12, 8), steelGrayMat);
+        boltHandle.position.set(0.07, 0.03, 0.05);
+        boltHandle.rotation.z = Math.PI / 3;
+        sniperGroup.add(boltHandle);
+
+        sniperGroup.position.set(0.25, -0.25, -0.7);
+        sniperGroup.visible = false;
+        weaponContainer.add(sniperGroup);
+
+        // Red glowing physical bullet projectile group
+        const bullets = [];
+        const shellCasings = [];
+        const bulletHoles = []; // Fading structural decals
+
+        // Muzzle Flash PointLight & Visual Mesh
+        const muzzleFlashLight = new THREE.PointLight(0xffaa00, 0, 10);
+        scene.add(muzzleFlashLight);
+        const muzzleFlashGeo = new THREE.SphereGeometry(0.2, 8, 8);
+        const muzzleFlashMat = new THREE.MeshBasicMaterial({ color: 0xffaa00, transparent: true, opacity: 0 });
+        const muzzleFlashMesh = new THREE.Mesh(muzzleFlashGeo, muzzleFlashMat);
+        scene.add(muzzleFlashMesh);
+
+        // Grapple rope + hook visualizer
+        // Rope is a chain of short cylinder segments driven by one InstancedMesh -- looks like an
+        // actual rope with a bit of sag, but is still a single draw call (cheap on integrated GPUs).
+        const ROPE_SEGMENTS = 10;
+        const ROPE_RADIUS = 0.07;
+        const ropeGeo = new THREE.CylinderGeometry(1, 1, 1, 5, 1, true);
+        const ropeMat = new THREE.MeshStandardMaterial({ color: 0x151515, roughness: 0.6, metalness: 0.3, emissive: 0x00453c, emissiveIntensity: 0.4 });
+        const ropeMesh = new THREE.InstancedMesh(ropeGeo, ropeMat, ROPE_SEGMENTS);
+        ropeMesh.visible = false;
+        ropeMesh.castShadow = false;
+        ropeMesh.receiveShadow = false;
+        scene.add(ropeMesh);
+        const _ropeDummy = new THREE.Object3D();
+        const _ropeUpAxis = new THREE.Vector3(0, 1, 0);
+        let grappleNormal = new THREE.Vector3(0, 1, 0);
+
+        // 3-pronged grappling hook -- built once, reused for every shot. Local +Y is the "toward
+        // player" side (rope attaches here); the 3 prongs splay out along local -Y (embeds in the
+        // surface). We orient the whole group with local +Y aligned to the surface normal at fire time.
+        const hookGroup = new THREE.Group();
+        const hookShaftMat = new THREE.MeshStandardMaterial({ color: 0x2b2b2b, roughness: 0.35, metalness: 0.85 });
+        const hookProngMat = new THREE.MeshStandardMaterial({ color: 0x999999, roughness: 0.25, metalness: 0.9, emissive: 0x00ffcc, emissiveIntensity: 0.3 });
+        const hookShaft = new THREE.Mesh(new THREE.CylinderGeometry(0.09, 0.13, 0.55, 6), hookShaftMat);
+        hookShaft.position.y = 0.28;
+        hookGroup.add(hookShaft);
+        const hookCollar = new THREE.Mesh(new THREE.CylinderGeometry(0.16, 0.16, 0.1, 6), hookShaftMat);
+        hookGroup.add(hookCollar);
+        for (let i = 0; i < 3; i++) {
+            const angle = (i / 3) * Math.PI * 2;
+            const prong = new THREE.Mesh(new THREE.ConeGeometry(0.055, 0.42, 5), hookProngMat);
+            const embedDir = new THREE.Vector3(Math.cos(angle) * 0.32, -0.85, Math.sin(angle) * 0.32).normalize();
+            prong.position.copy(embedDir.clone().multiplyScalar(0.2));
+            prong.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), embedDir);
+            hookGroup.add(prong);
+        }
+        hookGroup.visible = false;
+        scene.add(hookGroup);
+
+        // Redraws the rope segments between two world-space points, with a light sag proportional
+        // to slack (how much longer the straight-line distance is than the current reeled-in length).
+        function updateRopeVisual(start, end) {
+            const straightDist = start.distanceTo(end);
+            const slack = Math.max(0, straightDist - grappleLength);
+            const sag = Math.min(slack * 0.45, 3.2);
+
+            let prev = start;
+            for (let i = 0; i < ROPE_SEGMENTS; i++) {
+                const t0 = i / ROPE_SEGMENTS;
+                const t1 = (i + 1) / ROPE_SEGMENTS;
+                const a = i === 0 ? start : prev;
+                const b = new THREE.Vector3().lerpVectors(start, end, t1);
+                b.y -= Math.sin(Math.PI * t1) * sag;
+
+                const mid = new THREE.Vector3().addVectors(a, b).multiplyScalar(0.5);
+                const segLen = Math.max(a.distanceTo(b), 0.001);
+                const dir = new THREE.Vector3().subVectors(b, a).normalize();
+
+                _ropeDummy.position.copy(mid);
+                _ropeDummy.quaternion.setFromUnitVectors(_ropeUpAxis, dir);
+                _ropeDummy.scale.set(ROPE_RADIUS, segLen, ROPE_RADIUS);
+                _ropeDummy.updateMatrix();
+                ropeMesh.setMatrixAt(i, _ropeDummy.matrix);
+                prev = b;
+            }
+            ropeMesh.instanceMatrix.needsUpdate = true;
+        }
+
+        // ===================== TITAN MECH =====================
+        // A pilotable mech, Titanfall-style: walk up, [F] to embark, camera jumps into the
+        // cockpit, giant chaingun replaces your sidearms, [F] again ejects you back out on foot.
+
+        const MECH_SPAWN = new THREE.Vector3(25, 0, 55); // world position of the parked Titan
+        const MECH_ENTER_RADIUS = 7.0;
+        const MECH_EYE_HEIGHT = 15.0;
+        const MECH_COLLIDER_RADIUS = 4.2;
+        const MECH_COLLIDER_HEIGHT = 17.0;
+        let isPilotingMech = false;
+        let nearMech = false;
+        let mechFireHeld = false;
+        let mechFireTimer = 0;
+        const MECH_FIRE_RATE = 0.065; // ~15 rounds/sec chaingun spool
+        let mechEnterExitCooldown = 0;
+        let preMechWeapon = 'katana';
+
+        const mechAccent = new THREE.MeshBasicMaterial({ color: 0xff8800 });
+        const mechHull = new THREE.MeshStandardMaterial({ color: 0x23262b, roughness: 0.55, metalness: 0.65 });
+        const mechJoint = new THREE.MeshStandardMaterial({ color: 0x14161a, roughness: 0.4, metalness: 0.8 });
+        const mechGlass = new THREE.MeshStandardMaterial({ color: 0x00ffcc, emissive: 0x00ffcc, emissiveIntensity: 0.9, roughness: 0.2, metalness: 0.1, transparent: true, opacity: 0.75 });
+
+        // --- Static world model (what you see parked in the bay, and re-parked on exit) ---
+        const mechWorldGroup = new THREE.Group();
+
+        function mechBox(w, h, d, mat, x, y, z) {
+            const m = new THREE.Mesh(new THREE.BoxGeometry(w, h, d), mat);
+            m.position.set(x, y, z);
+            m.castShadow = true;
+            return m;
+        }
+
+        // Legs (two thick box legs w/ knee + foot blocks)
+        for (const side of [-1, 1]) {
+            const thigh = mechBox(1.8, 5.5, 1.8, mechHull, side * 2.4, 12.2, 0);
+            const knee = mechBox(2.0, 1.0, 2.0, mechJoint, side * 2.4, 9.3, 0);
+            const shin = mechBox(1.5, 5.0, 1.5, mechHull, side * 2.4, 6.2, 0.3);
+            const foot = mechBox(2.2, 1.2, 3.6, mechJoint, side * 2.4, 3.4, 0.9);
+            mechWorldGroup.add(thigh, knee, shin, foot);
+        }
+        // Pelvis / torso / shoulders
+        mechWorldGroup.add(mechBox(4.5, 3.0, 3.2, mechJoint, 0, 15.2, 0));
+        mechWorldGroup.add(mechBox(6.0, 6.5, 4.2, mechHull, 0, 20.5, 0));
+        const reactorCore = new THREE.Mesh(new THREE.SphereGeometry(0.9, 10, 10), mechGlass);
+        reactorCore.position.set(0, 20.5, 2.2);
+        mechWorldGroup.add(reactorCore);
+        const reactorLight = new THREE.PointLight(0x00ffcc, 1.2, 20);
+        reactorLight.position.copy(reactorCore.position);
+        mechWorldGroup.add(reactorLight);
+        for (const side of [-1, 1]) {
+            mechWorldGroup.add(mechBox(2.6, 2.6, 3.4, mechJoint, side * 4.0, 23.2, 0));
+        }
+        // Cockpit head (glass dome up front, angled like a canopy)
+        const mechHead = mechBox(2.6, 2.2, 2.6, mechHull, 0, 25.2, 1.3);
+        mechWorldGroup.add(mechHead);
+        const mechVisor = new THREE.Mesh(new THREE.BoxGeometry(2.2, 0.9, 0.3), mechGlass);
+        mechVisor.position.set(0, 25.3, 2.7);
+        mechWorldGroup.add(mechVisor);
+        // Right-arm chaingun cluster
+        const gunMount = mechBox(1.4, 1.4, 1.4, mechJoint, 4.6, 19.5, 2.0);
+        mechWorldGroup.add(gunMount);
+        const gunBody = mechBox(1.3, 1.3, 4.2, mechHull, 4.6, 19.5, 4.6);
+        mechWorldGroup.add(gunBody);
+        for (let i = 0; i < 4; i++) {
+            const ang = (i / 4) * Math.PI * 2;
+            const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 3.0, 6), mechJoint);
+            barrel.rotation.x = Math.PI / 2;
+            barrel.position.set(4.6 + Math.cos(ang) * 0.35, 19.5 + Math.sin(ang) * 0.35, 6.8);
+            mechWorldGroup.add(barrel);
+        }
+        // Accent trims -- ties it visually to the rest of the district color language
+        [[0, 20.5, 2.2, 6.3, 0.3, 4.5], [0, 15.2, 0, 4.8, 0.25, 3.5]].forEach(([x, y, z, w, h, d]) => {
+            mechWorldGroup.add(mechBox(w, h, d, mechAccent, x, y, z));
+        });
+
+        mechWorldGroup.position.copy(MECH_SPAWN);
+        scene.add(mechWorldGroup);
+
+        // Bay marker beacon so the Titan is easy to spot from a distance
+        const mechBeaconLight = new THREE.PointLight(0xff8800, 1.5, 40);
+        mechBeaconLight.position.set(MECH_SPAWN.x, 30, MECH_SPAWN.z);
+        scene.add(mechBeaconLight);
+        const beamGeo = new THREE.CylinderGeometry(0.3, 0.3, 60, 8, 1, true);
+        const beamMat = new THREE.MeshBasicMaterial({ color: 0xff8800, transparent: true, opacity: 0.18, side: THREE.DoubleSide });
+        const mechBeam = new THREE.Mesh(beamGeo, beamMat);
+        mechBeam.position.set(MECH_SPAWN.x, 30, MECH_SPAWN.z);
+        scene.add(mechBeam);
+        const ringGeo = new THREE.RingGeometry(6.5, 7.5, 24);
+        const ringMat = new THREE.MeshBasicMaterial({ color: 0xff8800, transparent: true, opacity: 0.7, side: THREE.DoubleSide });
+        const mechRing = new THREE.Mesh(ringGeo, ringMat);
+        mechRing.rotation.x = -Math.PI / 2;
+        mechRing.position.set(MECH_SPAWN.x, 0.1, MECH_SPAWN.z);
+        scene.add(mechRing);
+
+        // --- Cockpit overlay: chunky canopy struts + the chaingun barrel cluster, parented to the
+        // camera so they read as "you're sitting inside the Titan's head" once piloting starts ---
+        const cockpitOverlay = new THREE.Group();
+        const strutMat = new THREE.MeshStandardMaterial({ color: 0x1a1c20, roughness: 0.5, metalness: 0.6 });
+        const cockpitAccent = new THREE.MeshBasicMaterial({ color: 0xff8800 });
+
+        const strutTop = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.12, 0.12), strutMat);
+        strutTop.position.set(0, 0.62, -1.0);
+        cockpitOverlay.add(strutTop);
+        const strutL = new THREE.Mesh(new THREE.BoxGeometry(0.12, 1.3, 0.12), strutMat);
+        strutL.position.set(-1.15, -0.05, -1.0);
+        cockpitOverlay.add(strutL);
+        const strutR = strutL.clone();
+        strutR.position.x = 1.15;
+        cockpitOverlay.add(strutR);
+        const dash = new THREE.Mesh(new THREE.BoxGeometry(2.6, 0.35, 0.5), strutMat);
+        dash.position.set(0, -0.62, -0.85);
+        cockpitOverlay.add(dash);
+        const dashAccentStrip = new THREE.Mesh(new THREE.BoxGeometry(2.4, 0.04, 0.05), cockpitAccent);
+        dashAccentStrip.position.set(0, -0.47, -0.6);
+        cockpitOverlay.add(dashAccentStrip);
+
+        // Chaingun barrel cluster, visible lower-right like the Titanfall pilot POV
+        const cockpitGun = new THREE.Group();
+        const cgMount = new THREE.Mesh(new THREE.BoxGeometry(0.5, 0.5, 0.6), strutMat);
+        cockpitGun.add(cgMount);
+        for (let i = 0; i < 4; i++) {
+            const ang = (i / 4) * Math.PI * 2;
+            const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.045, 0.045, 1.1, 6), mechJoint);
+            barrel.rotation.x = Math.PI / 2;
+            barrel.position.set(Math.cos(ang) * 0.11, Math.sin(ang) * 0.11, -0.75);
+            cockpitGun.add(barrel);
+        }
+        cockpitGun.position.set(0.55, -0.55, -0.9);
+        cockpitOverlay.add(cockpitGun);
+
+        cockpitOverlay.visible = false;
+        camera.add(cockpitOverlay);
+
+        function setMechExternalVisible(visible) {
+            mechWorldGroup.visible = visible;
+            mechBeaconLight.visible = visible;
+            mechBeam.visible = visible;
+            mechRing.visible = visible;
+        }
+
+        function enterMech() {
+            isPilotingMech = true;
+            mechEnterExitCooldown = 0.4;
+
+            // Stow the human loadout, bring up the cockpit
+            preMechWeapon = currentWeapon;
+            katanaGroup.visible = false;
+            sniperGroup.visible = false;
+            if (isScoped) stopSniperScope();
+            cockpitOverlay.visible = true;
+
+            // The player IS the Titan now -- snap tracking position onto it and hide the parked model
+            playerPos.set(mechWorldGroup.position.x, 0, mechWorldGroup.position.z);
+            velocity.set(0, 0, 0);
+            setMechExternalVisible(false);
+
+            // Bail out of anything that shouldn't carry over into mech piloting
+            if (isGrappling) stopGrapple();
+            isWallRunning = false;
+            isSliding = false;
+
+            document.getElementById('ui-weapon').textContent = 'TITAN CHAINGUN';
+            document.getElementById('ui-action').textContent = 'PILOTING';
+            document.getElementById('mech-prompt').style.display = 'none';
+            playSynthSound('grapple_zip');
+        }
+
+        function exitMech() {
+            isPilotingMech = false;
+            mechEnterExitCooldown = 0.4;
+            mechFireHeld = false;
+
+            // Eject a few units to the side so you don't spawn inside the chassis, park it here
+            const ejectDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+            ejectDir.y = 0; ejectDir.normalize();
+            mechWorldGroup.position.set(playerPos.x, 0, playerPos.z);
+            setMechExternalVisible(true);
+            playerPos.addScaledVector(ejectDir, 6.0);
+            playerPos.y = Math.max(playerPos.y, 3.0);
+            velocity.set(0, 0, 0);
+
+            cockpitOverlay.visible = false;
+            switchWeapon(preMechWeapon);
+            document.getElementById('ui-action').textContent = 'READY';
+            playSynthSound('grapple_zip');
+        }
+
+        function fireMechGun() {
+            playSynthSound('gunshot');
+            recoilPush = 0.05;
+            recoilPitch = 0.025;
+
+            const flash = document.getElementById('impact-frame');
+            flash.style.opacity = '0.18';
+            setTimeout(() => flash.style.opacity = '0', 40);
+
+            const barrelEnd = new THREE.Vector3(0.55, -0.55, -1.6).applyMatrix4(camera.matrixWorld);
+            muzzleFlashLight.position.copy(barrelEnd);
+            muzzleFlashLight.intensity = 20;
+            muzzleFlashLight.color.setHex(0xff8800);
+            muzzleFlashMesh.position.copy(barrelEnd);
+            muzzleFlashMesh.material.opacity = 1.0;
+            spawnParticles(barrelEnd, 4, 'smoke');
+
+            // Slight spread cone -- a chaingun sprays, it doesn't laser-beam
+            const spread = 0.02;
+            const dir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+            dir.x += (Math.random() - 0.5) * spread;
+            dir.y += (Math.random() - 0.5) * spread;
+            dir.z += (Math.random() - 0.5) * spread;
+            dir.normalize();
+
+            const bulletGeo = new THREE.CylinderGeometry(0.02, 0.02, 0.9, 4);
+            const bulletMat = new THREE.MeshBasicMaterial({ color: 0xffaa00 });
+            const bulletMesh = new THREE.Mesh(bulletGeo, bulletMat);
+            bulletMesh.rotation.x = Math.PI / 2;
+            bulletMesh.position.copy(barrelEnd);
+            scene.add(bulletMesh);
+
+            const tracerGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+            const tracerLine = new THREE.Line(tracerGeo, new THREE.LineBasicMaterial({ color: 0xffaa00, linewidth: 3 }));
+            scene.add(tracerLine);
+
+            bullets.push({
+                mesh: bulletMesh,
+                tracer: tracerLine,
+                velocity: dir.multiplyScalar(260),
+                prevPosition: barrelEnd.clone(),
+                life: 0
+            });
+        }
+
+        // ===================== END TITAN MECH =====================
+
+        // High-performance particle pool
+        const maxParticles = 120;
+        const particleGeometry = new THREE.BoxGeometry(0.12, 0.12, 0.12);
+        const particlePool = [];
+        let nextParticleIndex = 0;
+
+        for (let i = 0; i < maxParticles; i++) {
+            const pMesh = new THREE.Mesh(particleGeometry, new THREE.MeshBasicMaterial({ color: 0xffaa00 }));
+            pMesh.visible = false;
+            scene.add(pMesh);
+            particlePool.push({
+                mesh: pMesh,
+                velocity: new THREE.Vector3(),
+                life: 0,
+                maxLife: 0,
+                colorType: 'spark' // spark, dust, smoke
+            });
+        }
+
+        function spawnParticles(origin, count, type = 'spark', scale = 1, colorHex = null) {
+            for (let i = 0; i < count; i++) {
+                const particle = particlePool[nextParticleIndex];
+                particle.mesh.position.copy(origin);
+                particle.mesh.visible = true;
+                particle.colorType = type;
+
+                if (type === 'spark') {
+                    particle.mesh.material.color.setHex(colorHex !== null ? colorHex : 0xffaa00);
+                    particle.mesh.scale.set(1.5, 1.5, 1.5);
+                    particle.velocity.set(
+                        (Math.random() - 0.5) * 16 * scale,
+                        (Math.random() - 0.2) * 16 * scale,
+                        (Math.random() - 0.5) * 16 * scale
+                    );
+                } else if (type === 'dust') {
+                    particle.mesh.material.color.setHex(0xa9a9a9);
+                    particle.mesh.scale.set(2, 2, 2);
+                    particle.velocity.set(
+                        (Math.random() - 0.5) * 6 * scale,
+                        Math.random() * 8 * scale,
+                        (Math.random() - 0.5) * 6 * scale
+                    );
+                } else if (type === 'smoke') {
+                    particle.mesh.material.color.setHex(0xcccccc);
+                    particle.mesh.scale.set(1, 1, 1);
+                    particle.velocity.set(
+                        (Math.random() - 0.5) * 2,
+                        Math.random() * 3 + 1,
+                        (Math.random() - 0.5) * 2
+                    );
+                }
+                
+                particle.life = 0;
+                particle.maxLife = type === 'smoke' ? 0.8 : (0.2 + Math.random() * 0.3);
+                nextParticleIndex = (nextParticleIndex + 1) % maxParticles;
+            }
+        }
+
+        let keys = { KeyW: false, KeyS: false, KeyA: false, KeyD: false, ShiftLeft: false, KeyC: false, ControlLeft: false };
+        let isSliding = false;
+        let slideTimer = 0;          // counts down from 2.0s once a slide starts; 0 = can't slide
+        let slideKeyWasHeld = false; // edge-detects the Ctrl/C press so holding doesn't re-trigger it
+        const SLIDE_DURATION = 0.5;
+        const SLIDE_HEIGHT = 1.6;   // reduced capsule top height while sliding (vs. the normal 6.0)
+        const STAND_HEIGHT = 6.0;
+        let velocity = new THREE.Vector3();
+        let playerPos = new THREE.Vector3(0, 3, 20); // Feet tracking position
+        let isGrounded = true;
+        let wasGrounded = true;
+        let currentWeapon = 'katana';
+        
+        let isSprinting = false;
+        let isScoped = false;
+        let isGrappling = false;
+        let grapplePoint = new THREE.Vector3();
+        let grappleLength = 0;
+
+        // Grapple tuning (Titanfall/REDLINER-style elastic pull + swing)
+        const GRAPPLE_REEL_SPEED = 30.0;      // how fast the rope reels in (units/sec)
+        const GRAPPLE_MIN_LENGTH = 2.5;        // closest the reel can pull you to the anchor
+        const GRAPPLE_SPRING = 55.0;           // elastic correction force once rope is taut
+        const GRAPPLE_DAMPING = 4.0;           // kills radial oscillation/bounce on the rope
+        const GRAPPLE_PULL_ACCEL = 27.0;       // constant "yank" acceleration toward anchor
+        const GRAPPLE_MAX_SPEED = 60.0;        // soft speed cap while attached so it never explodes
+
+        // Wallrunning state
+        let isWallRunning = false;
+        let wallRunSide = 0;          // +1 = wall on right, -1 = wall on left
+        let wallRunNormal = new THREE.Vector3();
+        let wallRunTilt = 0;
+        let wallRunLockout = 0;       // brief cooldown after a wall-jump so you don't instantly reattach
+        const WALL_CHECK_DIST = 1.85; // must exceed the 1.5 collision-capsule radius, or the ray
+                                       // can never reach a wall once collision has pushed you off it
+        const WALL_RUN_MIN_SPEED = 5.5;
+        const WALL_RUN_GRAVITY = 5.5;      // lighter stick than before -- Titanfall barely drops you early in a run
+        const WALL_RUN_ACCEL = 46.0;
+        const WALL_RUN_MAX_SPEED = 44.0;   // steady-state wall speed, a touch above ground sprint
+        const WALL_JUMP_UP = 15.0;
+        const WALL_JUMP_PUSH = 17.0;
+        const WALL_JUMP_LOOK_KICK = 7.0;   // extra push toward your crosshair, Titanfall-style directional kick
+
+        // Custom combat animation properties
+        let katanaAnimState = 'idle'; // idle, pre-slash, slashing, follow, recovery
+        let katanaAnimTimer = 0;
+        let parryActive = false;
+        let hitStopTimer = 0; // Hit-stop micro freeze timer
+
+        // Dynamic visual head-bob & swing feedback properties
+        let targetCamHeight = 3.0; // Dynamic height transition
+        let currentCamHeight = 3.0;
+        let landDip = 0;
+        let yaw = 0, pitch = 0;
+        let cameraTilt = 0; // Cinematic camera slide and slash roll
+
+        // Recoil variables
+        let recoilPush = 0;
+        let recoilPitch = 0;
+
+        // Weapon sway parameters
+        let swayX = 0, swayY = 0;
+        let targetSwayX = 0, targetSwayY = 0;
+
+        // Footstep tracking metrics
+        let footstepTimer = 0;
+
+        document.getElementById('click-to-play').addEventListener('click', () => {
+            document.body.requestPointerLock();
+            if (audioCtx.state === 'suspended') audioCtx.resume();
+        });
+
+        document.addEventListener('pointerlockchange', () => {
+            document.getElementById('click-to-play').style.display = 
+                document.pointerLockElement === document.body ? 'none' : 'flex';
+        });
+
+        document.addEventListener('mousemove', (e) => {
+            if (document.pointerLockElement !== document.body) return;
+            yaw -= e.movementX * 0.002;
+            pitch -= e.movementY * 0.002;
+            pitch = Math.max(-Math.PI / 2.2, Math.min(Math.PI / 2.2, pitch));
+            
+            // Mouse dynamic movement sway lag
+            targetSwayX -= e.movementX * 0.0008;
+            targetSwayY -= e.movementY * 0.0008;
+        });
+
+        document.addEventListener('keydown', (e) => {
+            if (document.pointerLockElement !== document.body) return;
+            if (e.code in keys) keys[e.code] = true;
+            
+            if (e.code === 'Space') {
+                if (isPilotingMech) {
+                    // Titan jump jets -- a slower, heavier hop, no wall-jump/air-strafe tricks
+                    if (isGrounded) {
+                        velocity.y = 13.0;
+                        isGrounded = false;
+                        playSynthSound('footstep');
+                    }
+                } else if (isWallRunning) {
+                    // Wall jump: kick off the wall using its normal + a vertical pop, plus a push
+                    // toward wherever the crosshair is looking -- this is what lets you actually
+                    // aim your next wall or gap instead of always launching straight sideways.
+                    let lookDir = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                    lookDir.y = 0;
+                    lookDir.normalize();
+                    velocity.addScaledVector(wallRunNormal, WALL_JUMP_PUSH);
+                    velocity.addScaledVector(lookDir, WALL_JUMP_LOOK_KICK);
+                    velocity.y = WALL_JUMP_UP;
+                    isWallRunning = false;
+                    wallRunLockout = 0.15;
+                    playSynthSound('wall_hit_land');
+                } else if (isGrounded) {
+                    velocity.y = 16.0;
+                    isGrounded = false;
+                    playSynthSound('footstep');
+                }
+            }
+
+            if (e.code === 'ShiftLeft') {
+                isSprinting = true;
+            }
+
+            if (e.code === 'KeyE') {
+                // Single-click toggle: press once to fire & attach, press again to release + launch
+                if (!isPilotingMech) {
+                    if (isGrappling) stopGrapple(); else startGrapple();
+                }
+            }
+
+            if (e.code === 'KeyF' && mechEnterExitCooldown <= 0) {
+                if (isPilotingMech) {
+                    exitMech();
+                } else if (nearMech) {
+                    enterMech();
+                }
+            }
+
+            // Hotkeys
+            if (!isPilotingMech) {
+                if (e.code === 'Digit1') switchWeapon('katana');
+                if (e.code === 'Digit2') switchWeapon('sniper');
+            }
+        });
+
+        document.addEventListener('keyup', (e) => {
+            if (e.code in keys) keys[e.code] = false;
+            
+            if (e.code === 'ShiftLeft') {
+                isSprinting = false;
+            }
+        });
+
+        document.addEventListener('mousedown', (e) => {
+            if (document.pointerLockElement !== document.body) return;
+
+            if (isPilotingMech) {
+                if (e.button === 0) {
+                    mechFireHeld = true;
+                    mechFireTimer = 0; // fire immediately on click, then follow MECH_FIRE_RATE
+                }
+                return;
+            }
+
+            if (currentWeapon === 'katana') {
+                if (e.button === 0 && katanaAnimState === 'idle') startKatanaSlash();
+                if (e.button === 2) {
+                    parryActive = true;
+                    document.getElementById('ui-action').textContent = "PARRY STANCE";
+                }
+            } else {
+                if (e.button === 0) fireSniperWeapon();
+                if (e.button === 2) startSniperScope();
+            }
+        });
+
+        document.addEventListener('mouseup', (e) => {
+            if (isPilotingMech) {
+                if (e.button === 0) mechFireHeld = false;
+                return;
+            }
+
+            if (currentWeapon === 'katana') {
+                if (e.button === 2) {
+                    parryActive = false;
+                    document.getElementById('ui-action').textContent = "READY";
+                }
+            } else {
+                if (e.button === 2) stopSniperScope();
+            }
+        });
+
+        function switchWeapon(type) {
+            if(isScoped) stopSniperScope();
+            currentWeapon = type;
+            katanaGroup.visible = type === 'katana';
+            sniperGroup.visible = type === 'sniper';
+            document.getElementById('ui-weapon').textContent = type.toUpperCase();
+        }
+
+        function startSniperScope() {
+            isScoped = true;
+            document.getElementById('scope').style.display = 'block';
+            sniperGroup.visible = false;
+        }
+
+        function stopSniperScope() {
+            isScoped = false;
+            document.getElementById('scope').style.display = 'none';
+            if (currentWeapon === 'sniper') sniperGroup.visible = true;
+        }
+
+        function fireSniperWeapon() {
+            playSynthSound('gunshot');
+
+            // Recoil feedback values
+            recoilPush = 0.12;
+            recoilPitch = 0.08;
+
+            // Flash visual frame trigger
+            const flash = document.getElementById('impact-frame');
+            flash.style.opacity = '0.3';
+            setTimeout(() => flash.style.opacity = '0', 50);
+
+            // Fetch muzzle position in world space
+            const barrelEnd = new THREE.Vector3(0.25, -0.23, -2.5).applyMatrix4(camera.matrixWorld);
+
+            // Brief warm light emission
+            muzzleFlashLight.position.copy(barrelEnd);
+            muzzleFlashLight.intensity = 15;
+            muzzleFlashMesh.position.copy(barrelEnd);
+            muzzleFlashMesh.material.opacity = 1.0;
+
+            // Spawn muzzle smoke particles
+            spawnParticles(barrelEnd, 10, 'smoke');
+
+            // Create golden brass casing physics ejection
+            const casingGeo = new THREE.CylinderGeometry(0.015, 0.015, 0.06, 6);
+            const casingMesh = new THREE.Mesh(casingGeo, goldMat);
+            casingMesh.position.copy(barrelEnd);
+            casingMesh.rotation.set(Math.random(), Math.random(), Math.random());
+            scene.add(casingMesh);
+
+            const ejectionDir = new THREE.Vector3(1, 1, 0.5).applyQuaternion(camera.quaternion).normalize();
+            shellCasings.push({
+                mesh: casingMesh,
+                velocity: ejectionDir.multiplyScalar(4 + Math.random() * 2),
+                rotSpeed: new THREE.Vector3(Math.random() * 10, Math.random() * 10, Math.random() * 10),
+                life: 0
+            });
+
+            // Spawn Physical high-velocity Bullet Projectile
+            const bulletGeo = new THREE.CylinderGeometry(0.012, 0.012, 0.5, 4);
+            const bulletMat = new THREE.MeshBasicMaterial({ color: 0xff3300 });
+            const bulletMesh = new THREE.Mesh(bulletGeo, bulletMat);
+            bulletMesh.rotation.x = Math.PI / 2;
+            bulletMesh.position.copy(barrelEnd);
+            scene.add(bulletMesh);
+
+            // Red glowing high-fidelity tracer trail behind bullet
+            const tracerGeo = new THREE.BufferGeometry().setFromPoints([new THREE.Vector3(), new THREE.Vector3()]);
+            const tracerLine = new THREE.Line(tracerGeo, new THREE.LineBasicMaterial({ color: 0xff0000, linewidth: 3 }));
+            scene.add(tracerLine);
+
+            const travelDirection = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion).normalize();
+            
+            bullets.push({
+                mesh: bulletMesh,
+                tracer: tracerLine,
+                velocity: travelDirection.multiplyScalar(220), // Physical fast bullet velocity (units/sec)
+                prevPosition: barrelEnd.clone(),
+                life: 0
+            });
+        }
+
+        function handleBulletImpact(point, normal, hitObject) {
+            // Check if hitting target combat dummy
+            const hitDummy = targets.find(t => t.position.distanceTo(point) < 3.5);
+            
+            if (hitDummy) {
+                playSynthSound('hit_metal');
+                spawnParticles(point, 24, 'spark', 1.5);
+                hitDummy.position.y += 10;
+                // Add extreme target structural reaction scale
+                hitDummy.scale.set(0.1, 2.0, 0.1);
+                setTimeout(() => {
+                    hitDummy.position.y -= 10;
+                    hitDummy.scale.set(1.0, 1.0, 1.0);
+                }, 1000);
+            } else {
+                playSynthSound('hit_wall');
+                spawnParticles(point, 16, 'dust', 1.0);
+
+                // Structural Bullet hole decals
+                const holeGeo = new THREE.CircleGeometry(0.12, 8);
+                const holeMat = new THREE.MeshBasicMaterial({ color: 0x222222, side: THREE.DoubleSide });
+                const decal = new THREE.Mesh(holeGeo, holeMat);
+                decal.position.copy(point).add(normal.clone().multiplyScalar(0.01)); // Prevent clipping (Z-fighting)
+                
+                // Align decal plane normal to matching hit face normal
+                const axis = new THREE.Vector3(0, 0, 1);
+                decal.quaternion.setFromUnitVectors(axis, normal);
+                scene.add(decal);
+                bulletHoles.push({ mesh: decal, age: 0 });
+            }
+        }
+
+        function startKatanaSlash() {
+            katanaAnimState = 'pre-slash';
+            katanaAnimTimer = 0;
+            document.getElementById('ui-action').textContent = "SLASHING";
+        }
+
+        function triggerKatanaSlashImpact() {
+            playSynthSound('whoosh');
+            
+            // Camera slide & swing tilt kickbacks
+            cameraTilt = 0.08;
+
+            // Query slice hit against dummy
+            targets.forEach(dummy => {
+                if (playerPos.distanceTo(dummy.position) < 8.5) {
+                    playSynthSound('hit_metal');
+                    spawnParticles(dummy.position, 18, 'spark', 1.2, 0x00ffe0);
+                    
+                    // Hit stop trigger: short satisfying frames freeze (60ms)
+                    hitStopTimer = 0.06;
+
+                    // Dummy visual hit physics reaction
+                    dummy.scale.set(1.4, 0.4, 1.4);
+                    setTimeout(() => dummy.scale.set(1, 1, 1), 500);
+                }
+            });
+
+            // Debris if player slashes geometry up close
+            const slashRay = new THREE.Raycaster();
+            slashRay.setFromCamera(new THREE.Vector2(0,0), camera);
+            const wallHits = slashRay.intersectObjects(mapElements);
+            if (wallHits.length > 0 && wallHits[0].distance < 7.0) {
+                playSynthSound('hit_wall');
+                spawnParticles(wallHits[0].point, 12, 'dust', 0.8);
+            }
+        }
+
+        function startGrapple() {
+            if (isGrappling) return;
+
+            const raycaster = new THREE.Raycaster();
+            raycaster.setFromCamera(new THREE.Vector2(0, 0), camera);
+            raycaster.far = 140;
+
+            const intersects = raycaster.intersectObjects(mapElements);
+            if (intersects.length > 0) {
+                isGrappling = true;
+                grapplePoint.copy(intersects[0].point);
+                // Start the rope with a touch of slack above the min length so the initial
+                // yank has somewhere to pull from -- this is what gives the "REDLINER snap".
+                grappleLength = Math.max(playerPos.distanceTo(grapplePoint) * 0.92, GRAPPLE_MIN_LENGTH);
+
+                // Orient the hook to bite into the actual surface it hit
+                if (intersects[0].face) {
+                    grappleNormal.copy(intersects[0].face.normal).transformDirection(intersects[0].object.matrixWorld).normalize();
+                } else {
+                    grappleNormal.copy(camera.position).sub(grapplePoint).normalize();
+                }
+                hookGroup.position.copy(grapplePoint);
+                hookGroup.quaternion.setFromUnitVectors(new THREE.Vector3(0, 1, 0), grappleNormal);
+                hookGroup.visible = true;
+                ropeMesh.visible = true;
+
+                document.getElementById('ui-state').textContent = 'GRAPPLING';
+                playSynthSound('grapple_zip');
+                spawnParticles(grapplePoint, 15, 'spark', 0.8, 0xff2266);
+            }
+        }
+
+        function stopGrapple() {
+            if (!isGrappling) return;
+            isGrappling = false;
+            ropeMesh.visible = false;
+            hookGroup.visible = false;
+            document.getElementById('ui-state').textContent = 'NORMAL';
+            // Momentum is intentionally left untouched here -- releasing the hook
+            // launches the player using whatever velocity they built up on the rope.
+            playSynthSound('grapple_zip');
+        }
+
+        function handleStructuralCollisions(pos, vel, radius, height, delta) {
+            // Ground clipping
+            let onGround = false;
+            if (pos.y <= 3.0) {
+                pos.y = 3.0;
+                vel.y = 0;
+                onGround = true;
+            }
+
+            // Slide speed preserve boost ramp coordinates check:
+            // Ramp bounds: x (-60 to -30), z (-150 to -70)
+            if (pos.x > -60 && pos.x < -30 && pos.z > -150 && pos.z < -70) {
+                // Incline slope height alignment (Math.PI / 10 is ~18 degrees)
+                const relativeZ = -70 - pos.z; // travel down Z
+                const rampHeight = 1 + relativeZ * Math.tan(Math.PI / 10);
+                if (pos.y < rampHeight + 3.0) {
+                    pos.y = rampHeight + 3.0;
+                    vel.y = 0;
+                    onGround = true;
+                }
+            }
+
+            // Loop 3 iterations of multi-pass sliding resolution to resolve corner overlaps smoothly
+            for (let i = 0; i < 3; i++) {
+                for (let box of collidables) {
+                    // Check intersection between bounding capsule and AABB walls
+                    const pMinX = pos.x - radius;
+                    const pMaxX = pos.x + radius;
+                    const pMinZ = pos.z - radius;
+                    const pMaxZ = pos.z + radius;
+                    const pMinY = pos.y - 3.0;
+                    const pMaxY = pos.y + height;
+
+                    if (pMaxX > box.minX && pMinX < box.maxX &&
+                        pMaxZ > box.minZ && pMinZ < box.maxZ &&
+                        pMaxY > box.minY && pMinY < box.maxY) {
+
+                        // Find minimum overlap axis to slide naturally along walls
+                        const overlapX = Math.min(pMaxX - box.minX, box.maxX - pMinX);
+                        const overlapZ = Math.min(pMaxZ - box.minZ, box.maxZ - pMinZ);
+                        const overlapY = Math.min(pMaxY - box.minY, box.maxY - pMinY);
+
+                        if (overlapY < overlapX && overlapY < overlapZ) {
+                            // Ceiling or Platform ground intersection
+                            if (pos.y - 1.5 > (box.minY + box.maxY) / 2) {
+                                pos.y = box.maxY + 3.0;
+                                vel.y = Math.max(0, vel.y);
+                                onGround = true;
+                            } else {
+                                pos.y = box.minY - height;
+                                vel.y = Math.min(0, vel.y);
+                            }
+                        } else if (overlapX < overlapZ) {
+                            // Slide horizontal along X walls
+                            if (pos.x > (box.minX + box.maxX) / 2) {
+                                pos.x += overlapX;
+                            } else {
+                                pos.x -= overlapX;
+                            }
+                            vel.x = 0; // slide cleanly
+                        } else {
+                            // Slide horizontal along Z walls
+                            if (pos.z > (box.minZ + box.maxZ) / 2) {
+                                pos.z += overlapZ;
+                            } else {
+                                pos.z -= overlapZ;
+                            }
+                            vel.z = 0; // slide cleanly
+                        }
+                    }
+                }
+            }
+
+            return { pos, onGround };
+        }
+
+        let prevTime = performance.now();
+
+        function animate() {
+            requestAnimationFrame(animate);
+
+            const time = performance.now();
+            let delta = (time - prevTime) / 1000;
+            prevTime = time;
+
+            if (document.pointerLockElement !== document.body) {
+                renderer.render(scene, camera);
+                return;
+            }
+
+            // Handle combat hit stop micro-freeze visual accent
+            if (hitStopTimer > 0) {
+                hitStopTimer -= delta;
+                return; // halt update frames briefly
+            }
+
+            // 1. Process holding sprint actions
+            let maxSpeed = isSprinting ? 30.0 : 17.0;
+
+            // Slide: shrinks the collision capsule so you can duck under low obstacles, and
+            // (further down) cuts friction briefly so speed carries through instead of bleeding off.
+            // The slide only lasts SLIDE_DURATION seconds from the moment you press the key --
+            // holding it longer does not extend it; release and press again to slide once more.
+            let preSlideSpeed = Math.sqrt(velocity.x ** 2 + velocity.z ** 2);
+            const slideKeyHeld = keys.KeyC || keys.ControlLeft;
+            if (slideKeyHeld && !slideKeyWasHeld && isGrounded) {
+                slideTimer = SLIDE_DURATION;
+            }
+            slideKeyWasHeld = slideKeyHeld;
+            if (slideTimer > 0) slideTimer -= delta;
+            isSliding = isGrounded && slideKeyHeld && slideTimer > 0;
+
+            // 2. Camera crouching height and sliding tilt transitions
+            wallRunTilt += ((isWallRunning ? wallRunSide * 0.28 : 0) - wallRunTilt) * 11 * delta;
+            let roll = cameraTilt + wallRunTilt;
+            cameraTilt += (0 - cameraTilt) * 10 * delta;
+
+            targetCamHeight = isPilotingMech ? MECH_EYE_HEIGHT : (isSliding ? 1.3 : (isSprinting ? 2.5 : 3.0));
+            currentCamHeight += (targetCamHeight - currentCamHeight) * (isPilotingMech ? 4 : 15) * delta;
+
+            // Footstep audio synthesizer sync
+            if (isGrounded && (keys.KeyW || keys.KeyS || keys.KeyA || keys.KeyD)) {
+                footstepTimer += delta * (isSprinting ? 16 : 10);
+                if (footstepTimer >= Math.PI * 2) {
+                    footstepTimer = 0;
+                    playSynthSound('footstep');
+                }
+            }
+
+            // Land visual compression impact logic
+            if (isGrounded && !wasGrounded) {
+                landDip = -0.55; 
+                playSynthSound('wall_hit_land');
+            }
+            wasGrounded = isGrounded;
+            landDip += (0 - landDip) * 12 * delta; 
+
+            // Organic visual weapon sway decay
+            swayX += (targetSwayX - swayX) * 10 * delta;
+            swayY += (targetSwayY - swayY) * 10 * delta;
+            targetSwayX *= Math.pow(0.01, delta);
+            targetSwayY *= Math.pow(0.01, delta);
+
+            // Apply camera matrices with kinetic tilt transforms
+            camera.quaternion.setFromEuler(new THREE.Euler(pitch + recoilPitch, yaw, roll, 'YXZ'));
+            camera.position.set(playerPos.x, playerPos.y + currentCamHeight + landDip, playerPos.z);
+
+            // Slowly decay gun recoil Pitch values
+            recoilPitch += (0 - recoilPitch) * 10 * delta;
+
+            // 3. Complete Katana Swing State Machine Interpolation (Anticipation, Strike, Follow)
+            if (currentWeapon === 'katana') {
+                if (katanaAnimState === 'pre-slash') {
+                    katanaAnimTimer += delta * 12; // swift pull-back
+                    // Interpolate back to windup positions
+                    katanaGroup.position.lerp(new THREE.Vector3(0.5, -0.2, -0.3), 0.35);
+                    katanaGroup.rotation.set(Math.PI / 3, -0.5, -Math.PI / 3);
+                    if (katanaAnimTimer >= 1.0) {
+                        katanaAnimState = 'slashing';
+                        katanaAnimTimer = 0;
+                        triggerKatanaSlashImpact();
+                    }
+                } else if (katanaAnimState === 'slashing') {
+                    katanaAnimTimer += delta * 18; // rapid forward stroke
+                    // Perform swing sweeping arc
+                    katanaGroup.position.lerp(new THREE.Vector3(-0.6, -0.4, -0.8), 0.45);
+                    katanaGroup.rotation.set(-Math.PI / 4, 0.5, Math.PI / 3);
+                    if (katanaAnimTimer >= 1.0) {
+                        katanaAnimState = 'follow';
+                        katanaAnimTimer = 0;
+                    }
+                } else if (katanaAnimState === 'follow') {
+                    katanaAnimTimer += delta * 8; // follow-through swing drag
+                    katanaGroup.position.lerp(new THREE.Vector3(-0.7, -0.5, -0.9), 0.2);
+                    if (katanaAnimTimer >= 1.0) {
+                        katanaAnimState = 'recovery';
+                        katanaAnimTimer = 0;
+                    }
+                } else if (katanaAnimState === 'recovery') {
+                    katanaAnimTimer += delta * 5; // smooth return to stance
+                    katanaGroup.position.lerp(new THREE.Vector3(0.35 + swayX, -0.35 + swayY, -0.6), 0.15);
+                    katanaGroup.rotation.set(Math.PI / 4, 0, -Math.PI / 5);
+                    if (katanaAnimTimer >= 1.0) {
+                        katanaAnimState = 'idle';
+                        document.getElementById('ui-action').textContent = "READY";
+                    }
+                } else {
+                    // Stance idle sway tracking
+                    if (parryActive) {
+                        katanaGroup.position.lerp(new THREE.Vector3(0.1, -0.1, -0.45), 0.25);
+                        katanaGroup.rotation.set(0.1, 0.2, Math.PI / 2.1);
+                    } else {
+                        katanaGroup.position.set(0.35 + swayX, -0.35 + swayY, -0.6);
+                        katanaGroup.rotation.set(Math.PI / 4, 0, -Math.PI / 5);
+                    }
+                }
+            } else {
+                // Sniper recoil positioning kickbacks
+                let targetSniperPos = new THREE.Vector3(0.25 + swayX, -0.25 + swayY, -0.7 + recoilPush);
+                sniperGroup.position.lerp(targetSniperPos, 0.3);
+                recoilPush += (0 - recoilPush) * 12 * delta;
+            }
+
+            // 4. Update the real-time translucent Katana swing trail
+            if (currentWeapon === 'katana' && (katanaAnimState === 'slashing' || katanaAnimState === 'follow')) {
+                const hiltLocal = new THREE.Vector3(0, -0.1, 0);
+                const tipLocal = new THREE.Vector3(0, 1.4, 0);
+                const hiltW = hiltLocal.applyMatrix4(katanaGroup.matrixWorld);
+                const tipW = tipLocal.applyMatrix4(katanaGroup.matrixWorld);
+
+                trailHistory.push({ hilt: hiltW.clone(), tip: tipW.clone() });
+                if (trailHistory.length > trailPointsCount) trailHistory.shift();
+            } else {
+                if (trailHistory.length > 0) trailHistory.shift();
+            }
+
+            // Update vertex stream dynamically inside buffer allocation
+            const posAttr = trailGeo.getAttribute('position');
+            const uvAttr = trailGeo.getAttribute('uv');
+            for (let i = 0; i < trailPointsCount; i++) {
+                const histIdx = Math.min(i, trailHistory.length - 1);
+                if (trailHistory.length > 0 && histIdx >= 0) {
+                    const data = trailHistory[histIdx];
+                    posAttr.setXYZ(i * 2, data.hilt.x, data.hilt.y, data.hilt.z);
+                    posAttr.setXYZ(i * 2 + 1, data.tip.x, data.tip.y, data.tip.z);
+                } else {
+                    // Flatten invisible frames
+                    posAttr.setXYZ(i * 2, 0, 0, 0);
+                    posAttr.setXYZ(i * 2 + 1, 0, 0, 0);
+                }
+                uvAttr.setXY(i * 2, i / (trailPointsCount - 1), 0);
+                uvAttr.setXY(i * 2 + 1, i / (trailPointsCount - 1), 1);
+            }
+            posAttr.needsUpdate = true;
+            uvAttr.needsUpdate = true;
+
+            // 5. Update physical sniper bullets travel frames
+            for (let i = bullets.length - 1; i >= 0; i--) {
+                const b = bullets[i];
+                b.life += delta;
+
+                // Capture next translation position
+                const nextPos = b.mesh.position.clone().addScaledVector(b.velocity, delta);
+
+                // Check physical line segment intersection along path
+                const pathRay = new THREE.Raycaster(b.mesh.position, b.velocity.clone().normalize());
+                const distance = b.mesh.position.distanceTo(nextPos);
+                const hits = pathRay.intersectObjects(mapElements);
+
+                // Update red tracer geometry line vertices
+                b.tracer.geometry.setFromPoints([b.prevPosition, b.mesh.position]);
+
+                if (hits.length > 0 && hits[0].distance <= distance) {
+                    // Impact wall/geometry collision point
+                    handleBulletImpact(hits[0].point, hits[0].face.normal, hits[0].object);
+                    
+                    // Clear references
+                    scene.remove(b.mesh);
+                    scene.remove(b.tracer);
+                    bullets.splice(i, 1);
+                } else if (b.life > 3.0) {
+                    // Out of bounds timeout clean
+                    scene.remove(b.mesh);
+                    scene.remove(b.tracer);
+                    bullets.splice(i, 1);
+                } else {
+                    // Fly bullet forward
+                    b.prevPosition.copy(b.mesh.position);
+                    b.mesh.position.copy(nextPos);
+                    
+                    // Spawn glowing flight tracer spark particles
+                    if (Math.random() > 0.4) {
+                        spawnParticles(b.mesh.position, 1, 'spark', 0.2);
+                    }
+                }
+            }
+
+            // Update Golden brass ejected shell casing physics
+            for (let i = shellCasings.length - 1; i >= 0; i--) {
+                const sc = shellCasings[i];
+                sc.life += delta;
+                
+                sc.velocity.y -= 9.8 * delta; // standard gravity pull
+                sc.mesh.position.addScaledVector(sc.velocity, delta);
+                sc.mesh.rotation.x += sc.rotSpeed.x * delta;
+                sc.mesh.rotation.y += sc.rotSpeed.y * delta;
+
+                // Floor bounce checks
+                if (sc.mesh.position.y <= 0.05) {
+                    sc.mesh.position.y = 0.05;
+                    sc.velocity.y = -sc.velocity.y * 0.4; // friction rebound dampening
+                    sc.velocity.x *= 0.5;
+                    sc.velocity.z *= 0.5;
+                    sc.rotSpeed.multiplyScalar(0.5);
+                }
+
+                if (sc.life > 4.0) {
+                    scene.remove(sc.mesh);
+                    shellCasings.splice(i, 1);
+                }
+            }
+
+            // Decay muzzle flash intensity
+            if (muzzleFlashLight.intensity > 0) {
+                muzzleFlashLight.intensity -= delta * 120;
+                muzzleFlashMat.opacity -= delta * 10;
+            }
+
+            // Fade permanent bullet decals over time
+            for (let i = bulletHoles.length - 1; i >= 0; i--) {
+                const h = bulletHoles[i];
+                h.age += delta;
+                if (h.age > 15.0) {
+                    scene.remove(h.mesh);
+                    bulletHoles.splice(i, 1);
+                }
+            }
+
+            // Titan enter/exit cooldown and proximity prompt -- runs every frame regardless of
+            // piloting state so you can't instantly re-embark/eject, and so the prompt tracks you
+            // walking up to (or away from) the bay.
+            if (mechEnterExitCooldown > 0) mechEnterExitCooldown -= delta;
+            if (!isPilotingMech) {
+                const distToMech = Math.hypot(playerPos.x - mechWorldGroup.position.x, playerPos.z - mechWorldGroup.position.z);
+                nearMech = distToMech < MECH_ENTER_RADIUS;
+                document.getElementById('mech-prompt').style.display = nearMech ? 'block' : 'none';
+            }
+
+            if (!isPilotingMech) {
+            // 6. Steering vectors computed up front -- wallrun & grapple both need these
+            const moveVector = new THREE.Vector3();
+            moveVector.z = Number(keys.KeyW) - Number(keys.KeyS);
+            moveVector.x = Number(keys.KeyD) - Number(keys.KeyA);
+            moveVector.normalize();
+
+            const camForward = new THREE.Vector3(0,0,-1).applyQuaternion(camera.quaternion);
+            if (!isGrappling) camForward.y = 0; 
+            camForward.normalize();
+
+            const camRight = new THREE.Vector3(1,0,0).applyQuaternion(camera.quaternion);
+            camRight.y = 0; camRight.normalize();
+
+            if (wallRunLockout > 0) wallRunLockout -= delta;
+
+            // 7. Wallrun detection -- cast left/right off the player's hips looking for a run-able surface
+            if (!isGrappling) {
+                let foundWall = false;
+                if (isWallRunning) {
+                    // Stay attached: re-check the same side every frame so we fall off cleanly
+                    const checkDir = camRight.clone().multiplyScalar(wallRunSide);
+                    const ray = new THREE.Raycaster(playerPos.clone().add(new THREE.Vector3(0, 3, 0)), checkDir, 0, WALL_CHECK_DIST + 0.5);
+                    const hits = ray.intersectObjects(mapElements);
+                    const horizSpeedNow = Math.sqrt(velocity.x ** 2 + velocity.z ** 2);
+                    if (hits.length > 0 && Math.abs(hits[0].face.normal.y) < 0.3 && !isGrounded && horizSpeedNow > WALL_RUN_MIN_SPEED * 0.6) {
+                        wallRunNormal.copy(hits[0].face.normal).transformDirection(hits[0].object.matrixWorld).normalize();
+                        foundWall = true;
+                    }
+                } else if (wallRunLockout <= 0 && !isGrounded) {
+                    const horizSpeedNow = Math.sqrt(velocity.x ** 2 + velocity.z ** 2);
+                    if (horizSpeedNow > WALL_RUN_MIN_SPEED && (keys.KeyW || keys.KeyA || keys.KeyD)) {
+                        for (const side of [1, -1]) {
+                            const checkDir = camRight.clone().multiplyScalar(side);
+                            const ray = new THREE.Raycaster(playerPos.clone().add(new THREE.Vector3(0, 3, 0)), checkDir, 0, WALL_CHECK_DIST);
+                            const hits = ray.intersectObjects(mapElements);
+                            if (hits.length > 0 && Math.abs(hits[0].face.normal.y) < 0.3) {
+                                wallRunSide = side;
+                                wallRunNormal.copy(hits[0].face.normal).transformDirection(hits[0].object.matrixWorld).normalize();
+                                foundWall = true;
+                                isWallRunning = true;
+                                playSynthSound('grapple_zip');
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (!foundWall) isWallRunning = false;
+            } else {
+                isWallRunning = false;
+            }
+
+            // 8. Grappling: elastic reel-in pull + orbit-preserving swing physics
+            if (isGrappling) {
+                const hiltLocal = new THREE.Vector3(0.2, -0.2, -0.5);
+                const cameraWorldPos = hiltLocal.applyMatrix4(camera.matrixWorld);
+
+                let toGrapple = new THREE.Vector3().subVectors(grapplePoint, playerPos);
+                let dist = toGrapple.length();
+                let dir = toGrapple.clone().normalize();
+
+                // Auto-release once you actually arrive at the anchor -- conserves whatever
+                // momentum you carried in instead of continuing to yank/oscillate on a taut rope
+                // that has nowhere left to reel.
+                if (dist < GRAPPLE_MIN_LENGTH + 1.5) {
+                    stopGrapple();
+                } else {
+                    updateRopeVisual(cameraWorldPos, grapplePoint);
+
+                    // Reel the rope in over time -- this is what makes the hook actively pull you
+                    // toward the anchor rather than just being a static tether.
+                    grappleLength = Math.max(grappleLength - GRAPPLE_REEL_SPEED * delta, GRAPPLE_MIN_LENGTH);
+
+                    if (dist > grappleLength) {
+                        // Elastic spring correction once the rope goes taut
+                        let extension = dist - grappleLength;
+                        velocity.addScaledVector(dir, extension * GRAPPLE_SPRING * delta);
+
+                        // Damp only the outward radial component so the swing stays smooth
+                        // instead of oscillating -- tangential (swing) speed is untouched.
+                        let radialVel = velocity.dot(dir);
+                        if (radialVel < 0) {
+                            velocity.addScaledVector(dir, -radialVel * Math.min(GRAPPLE_DAMPING * delta, 1));
+                        }
+                    }
+
+                    // Constant "yank" acceleration toward the anchor for that snappy pull-in feel
+                    velocity.addScaledVector(dir, GRAPPLE_PULL_ACCEL * delta);
+
+                    // Soft speed cap so chained grapples can't runaway to infinity
+                    let spd = velocity.length();
+                    if (spd > GRAPPLE_MAX_SPEED) velocity.multiplyScalar(GRAPPLE_MAX_SPEED / spd);
+
+                    isGrounded = false;
+                }
+            } else if (isWallRunning) {
+                // Pin the player flush to the wall by cancelling velocity that pushes into/out of it
+                let radial = velocity.dot(wallRunNormal);
+                velocity.addScaledVector(wallRunNormal, -radial);
+
+                // Tangent direction along the wall that best matches current travel direction
+                let tangent = new THREE.Vector3(-wallRunNormal.z, 0, wallRunNormal.x);
+                if (tangent.dot(camForward) < 0) tangent.negate();
+                velocity.addScaledVector(tangent, WALL_RUN_ACCEL * delta);
+
+                // Titanfall-style wallrun holds a fast, steady speed instead of accelerating forever --
+                // clamp the tangential component only, so entering a wallrun fast doesn't get punished
+                // and entering slow still ramps up to full wallrun speed.
+                let tangentSpeed = velocity.dot(tangent);
+                if (tangentSpeed > WALL_RUN_MAX_SPEED) {
+                    velocity.addScaledVector(tangent, WALL_RUN_MAX_SPEED - tangentSpeed);
+                }
+
+                // Small outward push keeps the player pressed against the wall visually
+                velocity.addScaledVector(wallRunNormal, -2.0 * delta);
+
+                isGrounded = false;
+            } else if (isGrounded) {
+                // Ground friction only -- this must NOT run while airborne, or every jump/bunny-hop
+                // would instantly erase the sprint momentum you just built up.
+                let dragCoeff = isSliding ? 1.1 : 5.4;
+                velocity.x -= velocity.x * dragCoeff * delta;
+                velocity.z -= velocity.z * dragCoeff * delta;
+            } else {
+                // Light air drag -- keeps things controllable without eating chained momentum,
+                // so sprint -> jump -> wallrun -> grapple chains keep stacking speed.
+                velocity.x -= velocity.x * 0.4 * delta;
+                velocity.z -= velocity.z * 0.4 * delta;
+            }
+
+            // Apply gravity falls -- wallrunning uses a much lighter pull so runs last longer
+            if (!isGrounded) {
+                if (isWallRunning) {
+                    velocity.y -= WALL_RUN_GRAVITY * delta;
+                    if (velocity.y < -4) velocity.y = -4; // clamp the slow sink while attached
+                } else {
+                    velocity.y -= 30.0 * delta;
+                }
+            }
+
+            // 9. Manual steering control (Airborne maneuver adjustments)
+            // Skipped while wallrunning -- the tangent accel above already drives that movement,
+            // and free WASD accel here would fight it and make the run feel sticky.
+            if (!isWallRunning) {
+                // Air accel is intentionally much lower than ground accel now -- it's enough to
+                // steer/air-strafe, but sprinting off a ledge no longer launches you at full
+                // ground speed plus extra accel on top of it.
+                let accelTraction = isGrounded ? maxSpeed * 6.0 : maxSpeed * 1.6;
+                if (keys.KeyW || keys.KeyS) velocity.addScaledVector(camForward, moveVector.z * accelTraction * delta);
+                if (keys.KeyA || keys.KeyD) velocity.addScaledVector(camRight, moveVector.x * accelTraction * delta);
+
+                // Hard horizontal cap while airborne and not on a rope/wall -- sprint speed alone
+                // should never translate into "airborne sprint is way faster than ground sprint".
+                if (!isGrounded) {
+                    const AIR_HORIZ_MAX = 40.0;
+                    let horiz = Math.sqrt(velocity.x * velocity.x + velocity.z * velocity.z);
+                    if (horiz > AIR_HORIZ_MAX) {
+                        let s = AIR_HORIZ_MAX / horiz;
+                        velocity.x *= s;
+                        velocity.z *= s;
+                    }
+                }
+            }
+
+            // Global safety ceiling -- lets sprint->jump->wallrun->grapple chains stack into genuinely
+            // insane speed without ever going numerically unstable or tunneling through geometry.
+            const GLOBAL_MAX_SPEED = 130.0;
+            let totalSpd = velocity.length();
+            if (totalSpd > GLOBAL_MAX_SPEED) velocity.multiplyScalar(GLOBAL_MAX_SPEED / totalSpd);
+
+            // Apply calculated movement translation step
+            playerPos.addScaledVector(velocity, delta);
+
+            // 8. Dynamic structural sliding collision check
+            const colResult = handleStructuralCollisions(playerPos, velocity, 1.5, isSliding ? SLIDE_HEIGHT : STAND_HEIGHT, delta);
+            playerPos.copy(colResult.pos);
+            isGrounded = colResult.onGround;
+            } else {
+                // ===== Titan piloting physics: heavier, slower, no wallrun/grapple/slide tricks =====
+                const mechMoveVector = new THREE.Vector3();
+                mechMoveVector.z = Number(keys.KeyW) - Number(keys.KeyS);
+                mechMoveVector.x = Number(keys.KeyD) - Number(keys.KeyA);
+                mechMoveVector.normalize();
+
+                const mechForward = new THREE.Vector3(0, 0, -1).applyQuaternion(camera.quaternion);
+                mechForward.y = 0; mechForward.normalize();
+                const mechRight = new THREE.Vector3(1, 0, 0).applyQuaternion(camera.quaternion);
+                mechRight.y = 0; mechRight.normalize();
+
+                const mechMaxSpeed = isSprinting ? 22.0 : 13.0;
+                const mechAccel = isGrounded ? mechMaxSpeed * 5.0 : mechMaxSpeed * 2.0;
+                if (keys.KeyW || keys.KeyS) velocity.addScaledVector(mechForward, mechMoveVector.z * mechAccel * delta);
+                if (keys.KeyA || keys.KeyD) velocity.addScaledVector(mechRight, mechMoveVector.x * mechAccel * delta);
+
+                // Heavy ground friction, no air control to speak of -- a Titan doesn't strafe-juke
+                if (isGrounded) {
+                    velocity.x -= velocity.x * 8.0 * delta;
+                    velocity.z -= velocity.z * 8.0 * delta;
+                } else {
+                    velocity.x -= velocity.x * 0.6 * delta;
+                    velocity.z -= velocity.z * 0.6 * delta;
+                }
+                if (!isGrounded) velocity.y -= 34.0 * delta;
+
+                playerPos.addScaledVector(velocity, delta);
+                const mechCol = handleStructuralCollisions(playerPos, velocity, MECH_COLLIDER_RADIUS, MECH_COLLIDER_HEIGHT, delta);
+                playerPos.copy(mechCol.pos);
+                isGrounded = mechCol.onGround;
+
+                // Heavy footstep thuds, on a slower stride cadence than the human footstep loop
+                if (isGrounded && (keys.KeyW || keys.KeyS || keys.KeyA || keys.KeyD)) {
+                    footstepTimer += delta * (isSprinting ? 5.5 : 3.5);
+                    if (footstepTimer >= Math.PI * 2) {
+                        footstepTimer = 0;
+                        playSynthSound('wall_hit_land');
+                    }
+                }
+
+                // Drive the external chassis model to follow the pilot and face the camera's yaw --
+                // mostly matters for the moment you eject and see it standing where you left it.
+                mechWorldGroup.position.set(playerPos.x, 0, playerPos.z);
+                mechWorldGroup.rotation.y = yaw;
+
+                // Chaingun auto-fire while the mouse is held, on its own timer independent of frame rate
+                if (mechFireHeld) {
+                    mechFireTimer -= delta;
+                    if (mechFireTimer <= 0) {
+                        mechFireTimer = MECH_FIRE_RATE;
+                        fireMechGun();
+                    }
+                } else {
+                    mechFireTimer = 0;
+                }
+            }
+
+            // 9. Update live particles pool
+            for (let i = 0; i < maxParticles; i++) {
+                const p = particlePool[i];
+                if (p.mesh.visible) {
+                    p.life += delta;
+                    if (p.life >= p.maxLife) {
+                        p.mesh.visible = false;
+                    } else {
+                        if (p.colorType === 'smoke') {
+                            p.velocity.y += 1 * delta; // smoke drifts up
+                        } else {
+                            p.velocity.y -= 12 * delta; // sparks fall down
+                        }
+                        p.mesh.position.addScaledVector(p.velocity, delta);
+                    }
+                }
+            }
+
+            // Real-time speed output to HUD
+            let horizSpeed = Math.sqrt(velocity.x**2 + velocity.z**2);
+            document.getElementById('ui-speed').textContent = Math.round(horizSpeed);
+
+            // Dynamic camera FOV adjustments depending on sprints, wallruns and ADS zooms
+            if (isPilotingMech) {
+                camera.fov += (82 - camera.fov) * 6 * delta; // steady cockpit FOV, no whip-zoom from sprint/wallrun
+            } else if (isScoped) {
+                camera.fov += (22 - camera.fov) * 15 * delta;
+            } else if (isWallRunning || isGrappling) {
+                camera.fov += (92 - camera.fov) * 8 * delta;
+            } else if (isSprinting) {
+                camera.fov += (88 - camera.fov) * 8 * delta;
+            } else {
+                camera.fov += (75 - camera.fov) * 8 * delta;
+            }
+            camera.updateProjectionMatrix();
+
+            // HUD state readout
+            const stateEl = document.getElementById('ui-state');
+            if (isPilotingMech) stateEl.textContent = 'PILOTING';
+            else if (isGrappling) stateEl.textContent = 'GRAPPLING';
+            else if (isWallRunning) stateEl.textContent = 'WALLRUNNING';
+            else if (isSliding) stateEl.textContent = 'SLIDING';
+            else if (!isGrounded) stateEl.textContent = 'AIRBORNE';
+            else if (isSprinting) stateEl.textContent = 'SPRINTING';
+            else stateEl.textContent = 'NORMAL';
+
+            // Highlight target materials inside the thermal scope correctly
+            targets.forEach(t => {
+                t.material = isScoped ? thermalMaterial : dummyMaterial;
+            });
+
+            renderer.render(scene, camera);
+        }
+
+        window.addEventListener('resize', () => {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        });
+
+        // Initialize engine tick
+        animate();
+    </script>
+</body>
+</html>
